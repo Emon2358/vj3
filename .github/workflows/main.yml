@@ -1,5 +1,5 @@
-# ファイル：.github/workflows/glitch-cutout.yml
-name: Glitch Cut-Out Effect
+# .github/workflows/glitch-cutout-fixed.yml
+name: Glitch Cut-Out Effect (Fixed)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ on:
         default: 'yes'
 
 jobs:
-  cutout:
+  cutout-fixed:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repo
@@ -41,45 +41,41 @@ jobs:
         run: |
           yt-dlp "${{ github.event.inputs.video_url }}" -o input.mp4
 
-      - name: Generate cut-out filter and apply
+      - name: Generate cut-out filter and apply (fixed)
         run: |
           set -eux
+
           HOLES=${{ github.event.inputs.holes }}
           MAXW=${{ github.event.inputs.max_hole_w }}
           MAXH=${{ github.event.inputs.max_hole_h }}
           NOISE_FILL="${{ github.event.inputs.noise_fill }}"
-          
-          # ベースフィルタ：RGBA -> 抜き穴 -> YUV
-          FILTER="[0:v]format=rgba"
-          
+
+          # 動画解像度を取得
+          read VID_W VID_H <<< "$(ffprobe -v error -select_streams v:0 \
+            -show_entries stream=width,height -of csv=p=0 input.mp4)"
+
+          # ベースフィルタ：RGBA モードに
+          FILTER="format=rgba"
+
           for i in $(seq 1 $HOLES); do
-            # ランダム位置・サイズ生成
-            WIDTH=$(( (RANDOM % MAXW) + 20 ))
-            HEIGHT=$(( (RANDOM % MAXH) + 20 ))
-            # 動画解像度を取得 (最初のパスのみ)
-            if [ $i -eq 1 ]; then
-              eval $(ffprobe -v error -select_streams v:0 \
-                -show_entries stream=width,height \
-                -of default=noprint_wrappers=1 input.mp4)
-              VID_W=$width
-              VID_H=$height
-            fi
+            WIDTH=$(( RANDOM % MAXW + 20 ))
+            HEIGHT=$(( RANDOM % MAXH + 20 ))
             X=$(( RANDOM % (VID_W - WIDTH) ))
             Y=$(( RANDOM % (VID_H - HEIGHT) ))
-            
-            # 穴を開ける（アルファ 0 にする）
+
+            # 穴を「透明」で開ける
             FILTER="$FILTER,drawbox=x=$X:y=$Y:w=$WIDTH:h=$HEIGHT:color=black@0.0:t=fill"
-            
+
             if [ "$NOISE_FILL" = "yes" ]; then
-              # 同じ位置にランダムノイズをオーバーレイ
-              FILTER="$FILTER,geq='r=255*random(0)':\
-g=255*random(0):b=255*random(0):a=255*(between(X\,X+$WIDTH\,%{x})*between(Y\,Y+$HEIGHT\,%{y}))'"
+              # 抜き穴部分だけマスクしてノイズを合成
+              # noiseフィルターで全体にノイズ、drawboxで元の映像を抜き穴部分のみ消す順序です
+              FILTER="$FILTER,noise=alls=20:allf=t,drawbox=x=$X:y=$Y:w=$WIDTH:h=$HEIGHT:color=black@0.0:t=fill"
             fi
           done
-          
+
+          # 最後に YUV に戻して出力可能に
           FILTER="$FILTER,format=yuv420p"
-          
-          # フィルタ適用
+
           ffmpeg -y -i input.mp4 -vf "$FILTER" \
             -c:v libx264 -crf 18 -preset veryfast \
             -c:a copy \
@@ -90,5 +86,5 @@ g=255*random(0):b=255*random(0):a=255*(between(X\,X+$WIDTH\,%{x})*between(Y\,Y+$
         with:
           author_name: github-actions
           author_email: github-actions@github.com
-          message: 'Add cut-out glitch video'
+          message: 'Add cut-out glitch video (fixed)'
           add: 'output.mp4'
