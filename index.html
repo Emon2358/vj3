@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ultra Glitch Web</title>
+  <style>
+    body { font-family: sans-serif; padding: 1em; background: #111; color: #eee; }
+    h1 { margin-bottom: .5em; }
+    input, button { font-size: 1em; margin-right: .5em; }
+    .controls { margin: 1em 0; }
+    .controls label { display: inline-block; margin-right: 1em; }
+    canvas { display: block; margin: 0 auto; max-width: 100%; background: black; }
+    a { color: #4af; }
+  </style>
+</head>
+<body>
+  <h1>Ultra Glitch Web</h1>
+  <input type="file" id="videoFile" accept="video/*" />
+  <button id="startBtn" disabled>加工開始</button>
+  <div class="controls">
+    <label><input type="checkbox" id="moshChk" checked /> Datamosh</label>
+    <label><input type="checkbox" id="pixelSortChk" /> Pixel Sort</label>
+    <label><input type="checkbox" id="rgbShiftChk" /> RGB Shift</label>
+    <label><input type="checkbox" id="cellAutoChk" /> Cell Auto</label>
+    <label><input type="checkbox" id="scanlineChk" /> Scanline</label>
+  </div>
+  <canvas id="canvas"></canvas>
+  <a id="downloadLink" style="display:none">完成動画をダウンロード</a>
+
+  <!-- Supermosh Core と PowerGlitch を CDN 経由で読み込み -->
+  <script type="module">
+    import { datamosh } from 'https://cdn.jsdelivr.net/npm/supermosh-core/dist/index.js';
+    import PowerGlitch from 'https://cdn.jsdelivr.net/npm/powerglitch/dist/powerglitch.min.js';
+
+    const fileInput = document.getElementById('videoFile');
+    const startBtn  = document.getElementById('startBtn');
+    const canvas    = document.getElementById('canvas');
+    const ctx       = canvas.getContext('2d');
+    const dlLink    = document.getElementById('downloadLink');
+
+    let videoData, videoType;
+
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      videoData = await file.arrayBuffer();
+      videoType = file.type;
+      startBtn.disabled = false;
+    });
+
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+
+      // 1) Datamosh 動画バイナリを生成
+      const moshData = datamosh(new Uint8Array(videoData));
+      const moshBlob = new Blob([moshData], { type: 'video/webm' });
+      const moshURL  = URL.createObjectURL(moshBlob);
+
+      // 2) <video> 要素で再生開始
+      const video = document.createElement('video');
+      video.src = moshURL;
+      video.crossOrigin = 'anonymous';
+      await video.play();
+
+      // 3) Canvas セットアップ
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      // 4) MediaRecorder で録画準備
+      const stream   = canvas.captureStream(30);
+      const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' });
+      const chunks   = [];
+      recorder.ondataavailable = e => chunks.push(e.data);
+      recorder.start();
+
+      // 5) 各種エフェクト関数定義
+      function pixelSort(ctx) {
+        const img = ctx.getImageData(0,0,ctx.canvas.width,ctx.canvas.height);
+        for (let y = 0; y < img.height; y += 5) {
+          const row = img.data.slice(y*img.width*4, (y+1)*img.width*4);
+          row.sort((a,b) => a - b);
+          img.data.set(row, y*img.width*4);
+        }
+        ctx.putImageData(img,0,0);
+      }
+
+      function rgbShift(ctx) {
+        const w = ctx.canvas.width, h = ctx.canvas.height;
+        const img = ctx.getImageData(0,0,w,h);
+        const out = ctx.createImageData(w,h);
+        const dx = 10, dy = 5;
+        for (let y=0; y<h; y++) {
+          for (let x=0; x<w; x++) {
+            const i = (y*w + x)*4;
+            const ix = ((y+dy)%h)*w + (x+dx)%w;
+            out.data[i  ] = img.data[ix*4  ];
+            out.data[i+1] = img.data[i+1];
+            out.data[i+2] = img.data[i+2];
+            out.data[i+3] = 255;
+          }
+        }
+        ctx.putImageData(out,0,0);
+      }
+
+      function cellAuto(ctx) {
+        PowerGlitch.glitch(ctx.canvas, {
+          shake: true,
+          slice: true,
+          offset: true,
+          repeat: 1,
+        });
+      }
+
+      function scanline(ctx) {
+        const w = ctx.canvas.width, h = ctx.canvas.height;
+        ctx.fillStyle = 'rgba(0,0,0,0.1)';
+        for (let y=0; y<h; y+=2) {
+          ctx.fillRect(0, y, w, 1);
+        }
+      }
+
+      // 6) フレーム描画ループ
+      function drawFrame() {
+        ctx.drawImage(video, 0, 0);
+        if (document.getElementById('pixelSortChk').checked) pixelSort(ctx);
+        if (document.getElementById('rgbShiftChk').checked)  rgbShift(ctx);
+        if (document.getElementById('cellAutoChk').checked)  cellAuto(ctx);
+        if (document.getElementById('scanlineChk').checked)  scanline(ctx);
+        requestAnimationFrame(drawFrame);
+      }
+      drawFrame();
+
+      // 7) 再生終了で録画停止・ダウンロードリンク生成
+      video.onended = () => {
+        recorder.stop();
+        recorder.onstop = () => {
+          const blob = new Blob(chunks, { type: 'video/webm' });
+          dlLink.href = URL.createObjectURL(blob);
+          dlLink.download = 'ultra_glitch.webm';
+          dlLink.style.display = 'inline';
+        };
+      };
+    });
+  </script>
+</body>
+</html>
