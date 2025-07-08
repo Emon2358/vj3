@@ -1,27 +1,34 @@
-# ファイル：.github/workflows/glitch-corrupt-h264.yml
-name: Glitch via H264 Stream Corruption
+# ファイル：.github/workflows/glitch-cutout.yml
+name: Glitch Cut-Out Effect
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'グリッチをかけたいニコニコ動画のURL'
+        description: '処理したいニコニコ動画のURL'
         required: true
-      passes:
-        description: '何ヵ所破壊するか（デフォルト3）'
+      holes:
+        description: '開ける穴の数'
         required: false
-        default: '3'
-      chunk_size:
-        description: '一度に破壊するバイト数（デフォルト5000）'
+        default: '5'
+      max_hole_w:
+        description: '穴の最大幅(px)'
         required: false
-        default: '5000'
+        default: '200'
+      max_hole_h:
+        description: '穴の最大高さ(px)'
+        required: false
+        default: '100'
+      noise_fill:
+        description: '穴をノイズで埋める (yes/no)'
+        required: false
+        default: 'yes'
 
 jobs:
-  corrupt-h264:
+  cutout:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out repository
+      - name: Check out repo
         uses: actions/checkout@v4
 
       - name: Install dependencies
@@ -30,42 +37,58 @@ jobs:
           sudo apt-get install -y ffmpeg python3-pip
           pip3 install yt-dlp
 
-      - name: Download video from NicoNico
+      - name: Download video
         run: |
           yt-dlp "${{ github.event.inputs.video_url }}" -o input.mp4
 
-      - name: Extract raw H.264 stream
-        run: |
-          # Annex-B 形式の .h264 を生成（映像のみ）
-          ffmpeg -y -i input.mp4 -c:v copy -bsf:v h264_mp4toannexb -an -f h264 input.h264
-
-      - name: Corrupt raw H.264 at multiple offsets
+      - name: Generate cut-out filter and apply
         run: |
           set -eux
-          PASSES=${{ github.event.inputs.passes }}
-          CHUNK=${{ github.event.inputs.chunk_size }}
-          SIZE=$(stat --printf="%s" input.h264)
-          echo "Stream size: ${SIZE} bytes"
-          for i in $(seq 1 $PASSES); do
-            # ファイルの 20% 〜 80% 範囲内でランダムに破壊位置を選択
-            OFFSET=$(( (RANDOM % (SIZE*60/100)) + (SIZE*20/100) ))
-            echo "Pass $i: corrupting ${CHUNK} bytes at offset ${OFFSET}"
-            dd if=/dev/urandom of=input.h264 bs=1 count=$CHUNK seek=$OFFSET conv=notrunc
+          HOLES=${{ github.event.inputs.holes }}
+          MAXW=${{ github.event.inputs.max_hole_w }}
+          MAXH=${{ github.event.inputs.max_hole_h }}
+          NOISE_FILL="${{ github.event.inputs.noise_fill }}"
+          
+          # ベースフィルタ：RGBA -> 抜き穴 -> YUV
+          FILTER="[0:v]format=rgba"
+          
+          for i in $(seq 1 $HOLES); do
+            # ランダム位置・サイズ生成
+            WIDTH=$(( (RANDOM % MAXW) + 20 ))
+            HEIGHT=$(( (RANDOM % MAXH) + 20 ))
+            # 動画解像度を取得 (最初のパスのみ)
+            if [ $i -eq 1 ]; then
+              eval $(ffprobe -v error -select_streams v:0 \
+                -show_entries stream=width,height \
+                -of default=noprint_wrappers=1 input.mp4)
+              VID_W=$width
+              VID_H=$height
+            fi
+            X=$(( RANDOM % (VID_W - WIDTH) ))
+            Y=$(( RANDOM % (VID_H - HEIGHT) ))
+            
+            # 穴を開ける（アルファ 0 にする）
+            FILTER="$FILTER,drawbox=x=$X:y=$Y:w=$WIDTH:h=$HEIGHT:color=black@0.0:t=fill"
+            
+            if [ "$NOISE_FILL" = "yes" ]; then
+              # 同じ位置にランダムノイズをオーバーレイ
+              FILTER="$FILTER,geq='r=255*random(0)':\
+g=255*random(0):b=255*random(0):a=255*(between(X\,X+$WIDTH\,%{x})*between(Y\,Y+$HEIGHT\,%{y}))'"
+            fi
           done
-
-      - name: Re-mux corrupted H.264 + original audio → output.mp4
-        run: |
-          ffmpeg -y \
-            -f h264 -i input.h264 \
-            -i input.mp4 -map 0:v -map 1:a \
-            -c:v libx264 -crf 23 -preset veryfast \
+          
+          FILTER="$FILTER,format=yuv420p"
+          
+          # フィルタ適用
+          ffmpeg -y -i input.mp4 -vf "$FILTER" \
+            -c:v libx264 -crf 18 -preset veryfast \
             -c:a copy \
             output.mp4
 
-      - name: Commit and push glitched video
+      - name: Commit & push
         uses: EndBug/add-and-commit@v7
         with:
           author_name: github-actions
           author_email: github-actions@github.com
-          message: 'Add glitched video (H264 stream corruption)'
+          message: 'Add cut-out glitch video'
           add: 'output.mp4'
