@@ -1,5 +1,5 @@
-# ファイル：.github/workflows/glitch-corrupt-only.yml
-name: Glitch Niconico Video (Corrupt Only)
+# ファイル：.github/workflows/glitch-corrupt-h264.yml
+name: Glitch via H264 Stream Corruption
 
 on:
   workflow_dispatch:
@@ -7,9 +7,17 @@ on:
       video_url:
         description: 'グリッチをかけたいニコニコ動画のURL'
         required: true
+      passes:
+        description: '何ヵ所破壊するか（デフォルト3）'
+        required: false
+        default: '3'
+      chunk_size:
+        description: '一度に破壊するバイト数（デフォルト5000）'
+        required: false
+        default: '5000'
 
 jobs:
-  corrupt-only:
+  corrupt-h264:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,31 +27,37 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg mkvtoolnix python3-pip
+          sudo apt-get install -y ffmpeg python3-pip
           pip3 install yt-dlp
 
       - name: Download video from NicoNico
         run: |
           yt-dlp "${{ github.event.inputs.video_url }}" -o input.mp4
 
-      - name: Remux to MKV (preserve streams)
+      - name: Extract raw H.264 stream
         run: |
-          ffmpeg -y -i input.mp4 -c copy input.mkv
+          # Annex-B 形式の .h264 を生成（映像のみ）
+          ffmpeg -y -i input.mp4 -c:v copy -bsf:v h264_mp4toannexb -an -f h264 input.h264
 
-      - name: Corrupt MKV payload only
+      - name: Corrupt raw H.264 at multiple offsets
         run: |
-          # ファイルサイズ取得
-          SIZE=$(stat --printf="%s" input.mkv)
-          # データ部の先頭（ヘッダがだいたい1MB以内に収まる想定）を避け、
-          # 中間位置から破壊開始
-          OFFSET=$(( SIZE / 2 ))
-          echo "Corrupting 1KB at offset ${OFFSET}"
-          # 1KiB をランダムバイトで上書き
-          dd if=/dev/urandom of=input.mkv bs=1 count=1024 seek=$OFFSET conv=notrunc
+          set -eux
+          PASSES=${{ github.event.inputs.passes }}
+          CHUNK=${{ github.event.inputs.chunk_size }}
+          SIZE=$(stat --printf="%s" input.h264)
+          echo "Stream size: ${SIZE} bytes"
+          for i in $(seq 1 $PASSES); do
+            # ファイルの 20% 〜 80% 範囲内でランダムに破壊位置を選択
+            OFFSET=$(( (RANDOM % (SIZE*60/100)) + (SIZE*20/100) ))
+            echo "Pass $i: corrupting ${CHUNK} bytes at offset ${OFFSET}"
+            dd if=/dev/urandom of=input.h264 bs=1 count=$CHUNK seek=$OFFSET conv=notrunc
+          done
 
-      - name: Re-decode corrupted MKV → output.mp4
+      - name: Re-mux corrupted H.264 + original audio → output.mp4
         run: |
-          ffmpeg -y -err_detect ignore_err -i input.mkv \
+          ffmpeg -y \
+            -f h264 -i input.h264 \
+            -i input.mp4 -map 0:v -map 1:a \
             -c:v libx264 -crf 23 -preset veryfast \
             -c:a copy \
             output.mp4
@@ -53,5 +67,5 @@ jobs:
         with:
           author_name: github-actions
           author_email: github-actions@github.com
-          message: 'Add glitched video (binary corrupt only)'
+          message: 'Add glitched video (H264 stream corruption)'
           add: 'output.mp4'
