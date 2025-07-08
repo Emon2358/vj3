@@ -1,0 +1,60 @@
+name: Glitch Niconico Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'グリッチをかけたいニコニコ動画のURL'
+        required: true
+
+jobs:
+  glitch:
+    runs-on: ubuntu-latest
+
+    steps:
+      # リポジトリをチェックアウト
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # ffmpeg と yt-dlp をインストール
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-pip
+          pip3 install yt-dlp
+
+      # ニコニコ動画をダウンロード
+      - name: Download video from NicoNico
+        run: |
+          yt-dlp "${{ github.event.inputs.video_url }}" -o input.mp4
+
+      # ① Frame Bleed / Smear (datamoshing) 効果
+      - name: Apply Frame Bleed (Smear) Effect
+        run: |
+          ffmpeg -y -i input.mp4 \
+            -vf "tblend=all_mode=screen,framestep=2,setpts=N/FRAME_RATE/TB,format=yuv420p" \
+            bleed.mp4
+
+      # ② Ghost Image 効果
+      - name: Apply Ghost Image Effect
+        run: |
+          ffmpeg -y -i input.mp4 \
+            -vf "tblend=all_mode=overlay,format=yuv420p" \
+            ghost.mp4
+
+      # ①と②を合成
+      - name: Merge Effects into output.mp4
+        run: |
+          ffmpeg -y -i bleed.mp4 -i ghost.mp4 \
+            -filter_complex "[0:v][1:v]overlay=format=auto" \
+            -c:v libx264 -crf 18 -preset veryfast \
+            output.mp4
+
+      # 結果をコミットしてプッシュ
+      - name: Commit and push glitched video
+        uses: EndBug/add-and-commit@v7
+        with:
+          author_name: github-actions
+          author_email: github-actions@github.com
+          message: 'Add glitched video (Frame Bleed + Ghost Image)'
+          add: 'output.mp4'
