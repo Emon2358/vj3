@@ -1,5 +1,5 @@
-# ファイル：.github/workflows/glitch-niconico.yml
-name: Glitch Niconico Video
+# ファイル：.github/workflows/glitch-corrupt-only.yml
+name: Glitch Niconico Video (Corrupt Only)
 
 on:
   workflow_dispatch:
@@ -7,13 +7,9 @@ on:
       video_url:
         description: 'グリッチをかけたいニコニコ動画のURL'
         required: true
-      method:
-        description: 'グリッチ手法 (filter1, filter2, corrupt)'
-        required: true
-        default: 'filter1'
 
 jobs:
-  glitch:
+  corrupt-only:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,66 +19,39 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg python3-pip
+          sudo apt-get install -y ffmpeg mkvtoolnix python3-pip
           pip3 install yt-dlp
 
       - name: Download video from NicoNico
         run: |
           yt-dlp "${{ github.event.inputs.video_url }}" -o input.mp4
 
-      - name: Choose and apply glitch method
+      - name: Remux to MKV (preserve streams)
         run: |
-          set -eux
-          case "${{ github.event.inputs.method }}" in
+          ffmpeg -y -i input.mp4 -c copy input.mkv
 
-          filter1)
-            echo "==> Method: Frame Bleed + Ghost"
-            ffmpeg -y -i input.mp4 \
-              -vf "framestep=2, tblend=all_mode=screen:all_opacity=0.9,format=yuv420p" \
-              -c:v libx264 -crf 18 -preset veryfast bleed.mp4
-            ffmpeg -y -i input.mp4 \
-              -vf "tblend=all_mode=lighten:all_opacity=0.5,format=yuv420p" \
-              -c:v libx264 -crf 18 -preset veryfast ghost.mp4
-            ffmpeg -y -i bleed.mp4 -i ghost.mp4 \
-              -filter_complex "[0:v][1:v]overlay=shortest=1:format=auto" \
-              -c:v libx264 -crf 18 -preset veryfast output.mp4
-            ;;
+      - name: Corrupt MKV payload only
+        run: |
+          # ファイルサイズ取得
+          SIZE=$(stat --printf="%s" input.mkv)
+          # データ部の先頭（ヘッダがだいたい1MB以内に収まる想定）を避け、
+          # 中間位置から破壊開始
+          OFFSET=$(( SIZE / 2 ))
+          echo "Corrupting 1KB at offset ${OFFSET}"
+          # 1KiB をランダムバイトで上書き
+          dd if=/dev/urandom of=input.mkv bs=1 count=1024 seek=$OFFSET conv=notrunc
 
-          filter2)
-            echo "==> Method: Channel Shift + Zoom Glitch"
-            # RGBチャンネルをずらして合成 → 乱暴な色ずれ
-            ffmpeg -y -i input.mp4 -filter_complex \
-              "[0:v]split=3[r][g][b]; \
-               [r]lutrgb=r='val+30':g='val':b='val'[R]; \
-               [g]lutrgb=r='val':g='val+30':b='val'[G]; \
-               [b]lutrgb=r='val':g='val':b='val+30'[B]; \
-               [R][G]blend=all_mode='addition':all_opacity=0.7[RG]; \
-               [RG][B]blend=all_mode='addition':all_opacity=0.7[RGB]; \
-               [RGB]zoompan=z='if(eq(on,1),1.5,max(1.001,zoom-0.005))':d=1:fps=30,format=yuv420p" \
-              -c:v libx264 -crf 18 -preset veryfast output.mp4
-            ;;
-
-          corrupt)
-            echo "==> Method: Binary Corruption"
-            # ファイル中間点付近をランダムバイトで上書き
-            SIZE=$(stat --printf="%s" input.mp4)
-            HALF=$((SIZE/2))
-            # 1キロバイトをランダムで破壊
-            dd if=/dev/urandom of=corrupt.mp4 bs=1 count=1024 seek=$HALF conv=notrunc
-            # 再デコードして再エンコード
-            ffmpeg -y -i corrupt.mp4 -c:v libx264 -crf 23 -preset veryfast output.mp4
-            ;;
-
-          *)
-            echo "Unknown method '${{ github.event.inputs.method }}'"
-            exit 1
-            ;;
-          esac
+      - name: Re-decode corrupted MKV → output.mp4
+        run: |
+          ffmpeg -y -err_detect ignore_err -i input.mkv \
+            -c:v libx264 -crf 23 -preset veryfast \
+            -c:a copy \
+            output.mp4
 
       - name: Commit and push glitched video
         uses: EndBug/add-and-commit@v7
         with:
           author_name: github-actions
           author_email: github-actions@github.com
-          message: 'Add glitched video (method: ${{ github.event.inputs.method }})'
+          message: 'Add glitched video (binary corrupt only)'
           add: 'output.mp4'
