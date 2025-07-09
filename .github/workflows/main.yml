@@ -1,5 +1,5 @@
 # .github/workflows/glitch-cutout-fixed.yml
-name: Glitch Cut-Out Effect (Fixed)
+name: Glitch Cut-Out Effect (GitHub Actions Only - Extreme Corruption)
 
 on:
   workflow_dispatch:
@@ -7,22 +7,6 @@ on:
       video_url:
         description: '処理したいニコニコ動画のURL'
         required: true
-      holes:
-        description: '開ける穴の数'
-        required: false
-        default: '5'
-      max_hole_w:
-        description: '穴の最大幅(px)'
-        required: false
-        default: '200'
-      max_hole_h:
-        description: '穴の最大高さ(px)'
-        required: false
-        default: '100'
-      noise_fill:
-        description: '穴をノイズで埋める (yes/no)'
-        required: false
-        default: 'yes'
 
 jobs:
   cutout-fixed:
@@ -34,72 +18,169 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg python3-pip
-          pip3 install yt-dlp
+          sudo apt-get install -y ffmpeg yt-dlp # yt-dlpもインストール
 
       - name: Download video
         run: |
+          # yt-dlpを使って動画をダウンロード
+          # output.mp4としてダウンロードし、後で処理
           yt-dlp "${{ github.event.inputs.video_url }}" -o input.mp4
 
-      - name: Generate cut-out filter and apply (fixed)
-        id: generate_video # 後続のステップでファイル名を参照するためにIDを設定
+      - name: Process video with extreme glitches
+        id: process_video_step # このステップにIDを付与
         run: |
           set -eux
 
-          HOLES=${{ github.event.inputs.holes }}
-          MAXW=${{ github.event.inputs.max_hole_w }}
-          MAXH=${{ github.event.inputs.max_hole_h }}
-          NOISE_FILL="${{ github.event.inputs.noise_fill }}"
+          # 動画の解像度とFPSを取得
+          VID_INFO=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate -of csv=p=0:s=x input.mp4)
+          VID_W=$(echo "$VID_INFO" | cut -d',' -f1 | cut -d'x' -f1)
+          VID_H=$(echo "$VID_INFO" | cut -d',' -f1 | cut -d'x' -f2)
+          # FPSは N/D の形式なので計算
+          FPS_NUM=$(echo "$VID_INFO" | cut -d',' -f3 | cut -d'/' -f1)
+          FPS_DEN=$(echo "$VID_INFO" | cut -d',' -f3 | cut -d'/' -f2)
+          if [ "$FPS_DEN" -eq 0 ]; then
+            INPUT_FPS=30
+          else
+            INPUT_FPS=$((FPS_NUM / FPS_DEN))
+          fi
 
-          # 動画解像度を取得
-          read VID_W VID_H <<< "$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=width,height -of csv=p=0 input.mp4)"
+          echo "Detected input resolution: ${VID_W}x${VID_H}, FPS: ${INPUT_FPS}"
 
-          # ベースフィルタ：RGBA モードに
-          FILTER="format=rgba"
+          # ランダムなグリッチパラメータを生成
+          RAND_SEED=$(date +%s%N) # シェルスクリプト用のランダムシード
+          # FFmpegのrandom()関数はシード固定のため、シェル側で乱数を生成
 
-          for i in $(seq 1 $HOLES); do
-            WIDTH=$(( RANDOM % MAXW + 20 ))
-            HEIGHT=$(( RANDOM % MAXH + 20 ))
-            X=$(( RANDOM % (VID_W - WIDTH) ))
-            Y=$(( RANDOM % (VID_H - HEIGHT) ))
+          # rotate
+          RANDOM_ROTATE_ANGLE_DEGREES=$(awk -v seed="$RAND_SEED" 'BEGIN{srand(seed); printf "%.2f", rand() * 9.5 + 0.5}')
+          RANDOM_ROTATE_ANGLE_RADIANS=$(awk -v val="$RANDOM_ROTATE_ANGLE_DEGREES" 'BEGIN{print val * (atan2(0,-1)/180)}')
 
-            # 穴を「透明」で開ける
-            FILTER="$FILTER,drawbox=x=$X:y=$Y:w=$WIDTH:h=$HEIGHT:color=black@0.0:t=fill"
+          # geq
+          RANDOM_GEQ_FACTOR=$(( RANDOM % 501 + 300 )) # 300-800
 
-            if [ "$NOISE_FILL" = "yes" ]; then
-              FILTER="$FILTER,noise=alls=20:allf=t"
-            fi
-          done
+          # glitch_fps
+          GLITCH_FPS_OPTIONS=(0.5 1 2 3 5 10 60 120)
+          GLITCH_FPS=${GLITCH_FPS_OPTIONS[$(( RANDOM % ${#GLITCH_FPS_OPTIONS[@]} ))]}
 
-          # 最後に YUV に戻して出力可能に
-          FILTER="$FILTER,format=yuv420p"
+          # pixel_block_size
+          PIXEL_BLOCK_SIZE=$(( RANDOM % 45 + 4 )) # 4-48
 
-          # 出力ファイル名にタイムスタンプを含める
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-          OUTPUT_FILENAME="glitch_cutout_${TIMESTAMP}.mp4"
+          # noise_strength
+          NOISE_STRENGTH=$(( RANDOM % 31 + 20 )) # 20-50
+
+          # distortion_factor
+          DISTORTION_FACTOR=$(awk -v seed="$RAND_SEED" 'BEGIN{srand(seed + 1); printf "%.3f", rand() * 0.09 + 0.01}')
+
+          # random_chroma_shift
+          RANDOM_CHROMA_SHIFT=$(( RANDOM % 41 + 10 )) # 10-50
+
+          # deadzone for x264-params (FFmpeg expects integer for deadzone)
+          DEADZONE=$(awk -v seed="$RAND_SEED" 'BEGIN{srand(seed + 2); printf "%.2f", rand() * 0.19 + 0.01}')
+          DEADZONE_INT=$(echo "$DEADZONE * 100" | bc | cut -d'.' -f1) # 整数に変換
+
+          # g_value for GOP size
+          G_VALUE=$(( INPUT_FPS * (RANDOM % 16 + 5) )) # 5 to 20 times FPS
+
+          # slices
+          SLICES=$(( RANDOM % 64 + 1 )) # 1-64
+
+          # フィルタグラフの構築
+          FILTER_COMPLEX="
+            [0:v]split=2[original][feedback_raw];
+            [feedback_raw]
+              fps=${GLITCH_FPS},
+              scale=${VID_W}:${VID_H},
+              tpad=start=0.05:stop=2,
+              rotate=${RANDOM_ROTATE_ANGLE_RADIANS}:ow=rotw(${RANDOM_ROTATE_ANGLE_RADIANS}):oh=roth(${RANDOM_ROTATE_ANGLE_RADIANS}),
+              scale=${VID_W}:${VID_H},
+              colorchannelmixer=2.0:-0.5:-0.5:0: -0.5:2.0:-0.5:0: -0.5:-0.5:2.0:0: 0:0:0:1,
+              geq=r='random(1)*${RANDOM_GEQ_FACTOR}':g='random(1)*${RANDOM_GEQ_FACTOR}':b='random(1)*${RANDOM_GEQ_FACTOR}',
+              gblur=sigma=10:steps=5,
+              scale=iw/${PIXEL_BLOCK_SIZE}:ih/${PIXEL_BLOCK_SIZE},
+              scale=${VID_W}:${VID_H}:flags=neighbor,
+              negate,
+              loop=loop=30:size=1:start=0,
+              curves=preset=strong_contrast,
+              lenscorrection=k1=${DISTORTION_FACTOR}:k2=${DISTORTION_FACTOR},
+              chromakey=0x00FF00:0.1:0.0,
+              edgedetect=mode=canny:low=0.1:high=0.4:intensity=5,
+              mpdecimate=hi=64*60:lo=64*10:frac=0.3,
+              setpts=PTS+random(0)*2/TB[glitch_feedback];
+
+            color=c=black:s=${VID_W}x${VID_H}:d=10,
+              format=yuv444p,
+              noise=${NOISE_STRENGTH},
+              format=rgb24,
+              format=yuv420p,
+              geq=r='(r(X,Y)+random(0)*150)':g='(g(X,Y)+random(0)*150)':b='(b(X,Y)+random(0)*150)',
+              lutrgb=r='clip(r+random(1)*${RANDOM_CHROMA_SHIFT},0,255)':g='clip(g+random(1)*${RANDOM_CHROMA_SHIFT},0,255)':b='clip(b+random(1)*${RANDOM_CHROMA_SHIFT},0,255)',
+              crop=$((VID_W/2)):$((VID_H/2)):$(( RANDOM % (VID_W/4) )):$(( RANDOM % (VID_H/4) )),scale=${VID_W}:${VID_H}:flags=neighbor,
+              shufflepixels=direction=horizontal:width=$(( RANDOM % 4 + 1 )):height=$(( RANDOM % 4 + 1 )),
+              setpts=PTS+random(0)*1.5/TB[noise_layer];
+
+            [0:a]showvolume=f=0:s=0:o=v:c=0xFFAABBCC,
+              format=yuv420p,
+              scale=${VID_W}:${VID_H},
+              geq=g='st(1, gt(abs(st(0, (T*2*PI*0.5)+sin(T*3*PI*0.1))) , 0.5)*255)',
+              setpts=PTS+random(0)*2.0/TB[audio_glitch];
+
+            [original][glitch_feedback]blend=all_mode=difference:all_opacity=1.0[blend1];
+            [blend1][noise_layer]blend=all_mode=addition:all_opacity=1.0[blend2];
+            [blend2][audio_glitch]blend=all_mode=grainmerge:all_opacity=1.0[v_out];
+
+            [0:a]acrusher=level_in=8:level_out=4:bits=$(( RANDOM % 8 + 1 )):mode=log:aa=1:samples=$(( RANDOM % 500 + 1 )):mix=0.8,
+              atempo=0.5,
+              compand=attacks=0:decays=0:points=-80/-80|-15/-15|0/0:soft-knee=0,
+              channelmap=channel_map=FL-FL|FR-FR, # チャンネルマップはランダムにしにくいので一旦固定
+              adelay=delays=100|200:all=1,
+              afade=t=out:st=3:d=1,
+              aselect='random(0)*0.8', asetpts=N/SR/TB[a]
+          "
+          # FILTER_COMPLEXの改行と空白を削除して1行にする (ffmpeg -filter_complex用)
+          FILTER_COMPLEX=$(echo "$FILTER_COMPLEX" | tr -d '\n' | sed 's/ //g')
+          # ただし、フィルター間のカンマは残す
 
           # FFmpegコマンドの実行
-          ffmpeg -y -i input.mp4 -vf "$FILTER" \
-            -c:v libx264 \
-            -c:a copy \
-            "$OUTPUT_FILENAME"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          OUTPUT_FILENAME="glitch_extreme_${TIMESTAMP}.mp4"
 
-          echo "output_filename=$OUTPUT_FILENAME" >> $GITHUB_OUTPUT # 出力ファイル名を次のステップに渡す
+          # FFmpegコマンドを構築
+          # -vf の代わりに -filter_complex を使用し、オーディオフィルターも指定
+          FFMPEG_CMD="ffmpeg -y -i input.mp4 -filter_complex \"${FILTER_COMPLEX}\" \
+            -map \"[v_out]\" -map \"[a]\" \
+            -c:v libx264 -preset ultrafast -crf 51 \
+            -profile:v baseline -level 3.0 \
+            -g ${G_VALUE} -keyint_min 1 -sc_threshold 0 \
+            -b:v 10k -slices ${SLICES} \
+            -x264-params \"me=dia:subme=0:trellis=0:no-fast-pskip=1:no-dct-decimate=1:nr=10000:deadzone-inter=${DEADZONE_INT}:deadzone-intra=${DEADZONE_INT}:qcomp=0.0\" \
+            -c:a aac -b:a 16k -pix_fmt yuv420p \
+            \"${OUTPUT_FILENAME}\""
+
+          echo "Running FFmpeg command:"
+          echo "$FFMPEG_CMD"
+          eval "$FFMPEG_CMD" || {
+              echo "FFmpeg command failed. This might be an intended part of the extreme glitch process!"
+              # ファイルが存在し、サイズが0より大きい場合は部分的に成功と見なす
+              if [ -s "$OUTPUT_FILENAME" ]; then
+                  echo "Partial output file generated. It might still contain extreme glitches!"
+              else
+                  echo "FFmpeg failed to produce any output file. The glitch settings might be too extreme for this input/FFmpeg version. Try slightly reducing random ranges or filter intensities."
+                  exit 1
+              fi
+          }
+
+          echo "output_file=$OUTPUT_FILENAME" >> $GITHUB_OUTPUT # 出力ファイル名を次のステップに渡す
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
-        if: success() # 前のステップが成功した場合のみ実行
+        if: success() && steps.process_video_step.outputs.output_file # 動画処理が成功し、かつ出力ファイルがある場合のみ実行
         with:
-          files: ${{ steps.generate_video.outputs.output_filename }} # 動的に生成されたファイル名を指定
-          tag_name: v${{ github.run_number }}-${{ github.run_id }} # 一意のタグ名
-          name: Glitch Cut-Out Video ${{ github.run_number }}
+          files: ${{ steps.process_video_step.outputs.output_file }} # 動的に生成されたファイル名を指定
+          tag_name: glitch-v${{ github.run_number }}-${{ github.run_id }} # 一意のタグ名
+          name: Extreme Glitch Video ${{ github.run_number }}
           body: |
-            このリリースには、ニコニコ動画のURLから生成されたグリッチカットアウト動画が含まれています。
+            このリリースには、ニコニコ動画のURLから極限まで破壊されたグリッチ動画が含まれています。
             入力URL: ${{ github.event.inputs.video_url }}
-            穴の数: ${{ github.event.inputs.holes }}
-            最大幅: ${{ github.event.inputs.max_hole_w }}px
-            最大高さ: ${{ github.event.inputs.max_hole_h }}px
-            ノイズ埋め: ${{ github.event.inputs.noise_fill }}
+
+            **警告**: この動画は意図的に破損されており、視認・聴取が困難な場合があります。
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # リポジトリへの書き込み権限を持つトークン
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
