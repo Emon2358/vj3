@@ -18,24 +18,21 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg yt-dlp # yt-dlpもインストール
+          sudo apt-get install -y ffmpeg yt-dlp
 
       - name: Download video
         run: |
-          # yt-dlpを使って動画をダウンロード
-          # output.mp4としてダウンロードし、後で処理
-          yt-dlp "${{ github.event.inputs.video_url }}" -o input.mp4
+          # --no-cache-dir を追加して、yt-dlpのキャッシュを使わないようにする
+          yt-dlp --no-cache-dir "${{ github.event.inputs.video_url }}" -o input.mp4
 
       - name: Process video with extreme glitches
-        id: process_video_step # このステップにIDを付与
+        id: process_video_step
         run: |
           set -eux
 
-          # 動画の解像度とFPSを取得
           VID_INFO=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate -of csv=p=0:s=x input.mp4)
           VID_W=$(echo "$VID_INFO" | cut -d',' -f1 | cut -d'x' -f1)
           VID_H=$(echo "$VID_INFO" | cut -d',' -f1 | cut -d'x' -f2)
-          # FPSは N/D の形式なので計算
           FPS_NUM=$(echo "$VID_INFO" | cut -d',' -f3 | cut -d'/' -f1)
           FPS_DEN=$(echo "$VID_INFO" | cut -d',' -f3 | cut -d'/' -f2)
           if [ "$FPS_DEN" -eq 0 ]; then
@@ -46,44 +43,21 @@ jobs:
 
           echo "Detected input resolution: ${VID_W}x${VID_H}, FPS: ${INPUT_FPS}"
 
-          # ランダムなグリッチパラメータを生成
-          RAND_SEED=$(date +%s%N) # シェルスクリプト用のランダムシード
-          # FFmpegのrandom()関数はシード固定のため、シェル側で乱数を生成
-
-          # rotate
+          RAND_SEED=$(date +%s%N)
           RANDOM_ROTATE_ANGLE_DEGREES=$(awk -v seed="$RAND_SEED" 'BEGIN{srand(seed); printf "%.2f", rand() * 9.5 + 0.5}')
           RANDOM_ROTATE_ANGLE_RADIANS=$(awk -v val="$RANDOM_ROTATE_ANGLE_DEGREES" 'BEGIN{print val * (atan2(0,-1)/180)}')
-
-          # geq
-          RANDOM_GEQ_FACTOR=$(( RANDOM % 501 + 300 )) # 300-800
-
-          # glitch_fps
+          RANDOM_GEQ_FACTOR=$(( RANDOM % 501 + 300 ))
           GLITCH_FPS_OPTIONS=(0.5 1 2 3 5 10 60 120)
           GLITCH_FPS=${GLITCH_FPS_OPTIONS[$(( RANDOM % ${#GLITCH_FPS_OPTIONS[@]} ))]}
-
-          # pixel_block_size
-          PIXEL_BLOCK_SIZE=$(( RANDOM % 45 + 4 )) # 4-48
-
-          # noise_strength
-          NOISE_STRENGTH=$(( RANDOM % 31 + 20 )) # 20-50
-
-          # distortion_factor
+          PIXEL_BLOCK_SIZE=$(( RANDOM % 45 + 4 ))
+          NOISE_STRENGTH=$(( RANDOM % 31 + 20 ))
           DISTORTION_FACTOR=$(awk -v seed="$RAND_SEED" 'BEGIN{srand(seed + 1); printf "%.3f", rand() * 0.09 + 0.01}')
-
-          # random_chroma_shift
-          RANDOM_CHROMA_SHIFT=$(( RANDOM % 41 + 10 )) # 10-50
-
-          # deadzone for x264-params (FFmpeg expects integer for deadzone)
+          RANDOM_CHROMA_SHIFT=$(( RANDOM % 41 + 10 ))
           DEADZONE=$(awk -v seed="$RAND_SEED" 'BEGIN{srand(seed + 2); printf "%.2f", rand() * 0.19 + 0.01}')
-          DEADZONE_INT=$(echo "$DEADZONE * 100" | bc | cut -d'.' -f1) # 整数に変換
+          DEADZONE_INT=$(echo "$DEADZONE * 100" | bc | cut -d'.' -f1)
+          G_VALUE=$(( INPUT_FPS * (RANDOM % 16 + 5) ))
+          SLICES=$(( RANDOM % 64 + 1 ))
 
-          # g_value for GOP size
-          G_VALUE=$(( INPUT_FPS * (RANDOM % 16 + 5) )) # 5 to 20 times FPS
-
-          # slices
-          SLICES=$(( RANDOM % 64 + 1 )) # 1-64
-
-          # フィルタグラフの構築
           FILTER_COMPLEX="
             [0:v]split=2[original][feedback_raw];
             [feedback_raw]
@@ -130,21 +104,16 @@ jobs:
             [0:a]acrusher=level_in=8:level_out=4:bits=$(( RANDOM % 8 + 1 )):mode=log:aa=1:samples=$(( RANDOM % 500 + 1 )):mix=0.8,
               atempo=0.5,
               compand=attacks=0:decays=0:points=-80/-80|-15/-15|0/0:soft-knee=0,
-              channelmap=channel_map=FL-FL|FR-FR, # チャンネルマップはランダムにしにくいので一旦固定
+              channelmap=channel_map=FL-FL|FR-FR,
               adelay=delays=100|200:all=1,
               afade=t=out:st=3:d=1,
               aselect='random(0)*0.8', asetpts=N/SR/TB[a]
           "
-          # FILTER_COMPLEXの改行と空白を削除して1行にする (ffmpeg -filter_complex用)
           FILTER_COMPLEX=$(echo "$FILTER_COMPLEX" | tr -d '\n' | sed 's/ //g')
-          # ただし、フィルター間のカンマは残す
 
-          # FFmpegコマンドの実行
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           OUTPUT_FILENAME="glitch_extreme_${TIMESTAMP}.mp4"
 
-          # FFmpegコマンドを構築
-          # -vf の代わりに -filter_complex を使用し、オーディオフィルターも指定
           FFMPEG_CMD="ffmpeg -y -i input.mp4 -filter_complex \"${FILTER_COMPLEX}\" \
             -map \"[v_out]\" -map \"[a]\" \
             -c:v libx264 -preset ultrafast -crf 51 \
@@ -159,7 +128,6 @@ jobs:
           echo "$FFMPEG_CMD"
           eval "$FFMPEG_CMD" || {
               echo "FFmpeg command failed. This might be an intended part of the extreme glitch process!"
-              # ファイルが存在し、サイズが0より大きい場合は部分的に成功と見なす
               if [ -s "$OUTPUT_FILENAME" ]; then
                   echo "Partial output file generated. It might still contain extreme glitches!"
               else
@@ -168,14 +136,14 @@ jobs:
               fi
           }
 
-          echo "output_file=$OUTPUT_FILENAME" >> $GITHUB_OUTPUT # 出力ファイル名を次のステップに渡す
+          echo "output_file=$OUTPUT_FILENAME" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
-        if: success() && steps.process_video_step.outputs.output_file # 動画処理が成功し、かつ出力ファイルがある場合のみ実行
+        if: success() && steps.process_video_step.outputs.output_file
         with:
-          files: ${{ steps.process_video_step.outputs.output_file }} # 動的に生成されたファイル名を指定
-          tag_name: glitch-v${{ github.run_number }}-${{ github.run_id }} # 一意のタグ名
+          files: ${{ steps.process_video_step.outputs.output_file }}
+          tag_name: glitch-v${{ github.run_number }}-${{ github.run_id }}
           name: Extreme Glitch Video ${{ github.run_number }}
           body: |
             このリリースには、ニコニコ動画のURLから極限まで破壊されたグリッチ動画が含まれています。
