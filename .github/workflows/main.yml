@@ -42,6 +42,7 @@ jobs:
           yt-dlp "${{ github.event.inputs.video_url }}" -o input.mp4
 
       - name: Generate cut-out filter and apply (fixed)
+        id: generate_video # 後続のステップでファイル名を参照するためにIDを設定
         run: |
           set -eux
 
@@ -67,24 +68,38 @@ jobs:
             FILTER="$FILTER,drawbox=x=$X:y=$Y:w=$WIDTH:h=$HEIGHT:color=black@0.0:t=fill"
 
             if [ "$NOISE_FILL" = "yes" ]; then
-              # 抜き穴部分だけマスクしてノイズを合成
-              # noiseフィルターで全体にノイズ、drawboxで元の映像を抜き穴部分のみ消す順序です
-              FILTER="$FILTER,noise=alls=20:allf=t,drawbox=x=$X:y=$Y:w=$WIDTH:h=$HEIGHT:color=black@0.0:t=fill"
+              FILTER="$FILTER,noise=alls=20:allf=t"
             fi
           done
 
           # 最後に YUV に戻して出力可能に
           FILTER="$FILTER,format=yuv420p"
 
-          ffmpeg -y -i input.mp4 -vf "$FILTER" \
-            -c:v libx264 -crf 18 -preset veryfast \
-            -c:a copy \
-            output.mp4
+          # 出力ファイル名にタイムスタンプを含める
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          OUTPUT_FILENAME="glitch_cutout_${TIMESTAMP}.mp4"
 
-      - name: Commit & push
-        uses: EndBug/add-and-commit@v7
+          # FFmpegコマンドの実行
+          ffmpeg -y -i input.mp4 -vf "$FILTER" \
+            -c:v libx264 \
+            -c:a copy \
+            "$OUTPUT_FILENAME"
+
+          echo "output_filename=$OUTPUT_FILENAME" >> $GITHUB_OUTPUT # 出力ファイル名を次のステップに渡す
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: success() # 前のステップが成功した場合のみ実行
         with:
-          author_name: github-actions
-          author_email: github-actions@github.com
-          message: 'Add cut-out glitch video (fixed)'
-          add: 'output.mp4'
+          files: ${{ steps.generate_video.outputs.output_filename }} # 動的に生成されたファイル名を指定
+          tag_name: v${{ github.run_number }}-${{ github.run_id }} # 一意のタグ名
+          name: Glitch Cut-Out Video ${{ github.run_number }}
+          body: |
+            このリリースには、ニコニコ動画のURLから生成されたグリッチカットアウト動画が含まれています。
+            入力URL: ${{ github.event.inputs.video_url }}
+            穴の数: ${{ github.event.inputs.holes }}
+            最大幅: ${{ github.event.inputs.max_hole_w }}px
+            最大高さ: ${{ github.event.inputs.max_hole_h }}px
+            ノイズ埋め: ${{ github.event.inputs.noise_fill }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # リポジトリへの書き込み権限を持つトークン
